@@ -16,6 +16,10 @@ type pairingAdmin struct {
 	imported []AccountStateInput
 }
 
+func (admin *pairingAdmin) Accounts(context.Context) ([]AdminAccount, error) {
+	return []AdminAccount{{ID: "a@example.com", Label: "a@example.com"}}, nil
+}
+
 // ImportAccountState 保存上传内容并返回同名账户
 func (admin *pairingAdmin) ImportAccountState(_ context.Context, input AccountStateInput) (AdminAccount, error) {
 	admin.imported = append(admin.imported, input)
@@ -101,5 +105,52 @@ func TestPairingTokenExpiry(t *testing.T) {
 	}
 	if (&pairingTokens{}).valid("", now) {
 		t.Fatal("未签发时空令牌有效")
+	}
+}
+
+// TestPairingUpdateScope 验证普通令牌不能覆盖账户，更新令牌只允许更新选定账户。
+func TestPairingUpdateScope(t *testing.T) {
+	admin := &pairingAdmin{}
+	s := &server{config: Config{Admin: admin}, pairing: &pairingTokens{}}
+	issue := func(target string, status int) PairingToken {
+		t.Helper()
+		body, _ := json.Marshal(map[string]string{"replace_account_id": target})
+		r := httptest.NewRequest("POST", "/api/pairing", strings.NewReader(string(body)))
+		w := httptest.NewRecorder()
+		s.handleCreatePairing(w, r)
+		if w.Code != status {
+			t.Fatalf("签发更新令牌 = %d %s", w.Code, w.Body)
+		}
+		var token PairingToken
+		if status == http.StatusCreated && json.Unmarshal(w.Body.Bytes(), &token) != nil {
+			t.Fatal("令牌格式不正确")
+		}
+		return token
+	}
+	upload := func(token, target string) int {
+		body, _ := json.Marshal(AccountStateInput{Label: "a@example.com", ReplaceAccountID: target})
+		r := httptest.NewRequest("POST", "/api/pairing/accounts", strings.NewReader(string(body)))
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		s.handlePairingAccount(w, r)
+		return w.Code
+	}
+	issue("missing@example.com", http.StatusNotFound)
+	ordinary := issue("", http.StatusCreated)
+	if code := upload(ordinary.Token, "a@example.com"); code != http.StatusForbidden {
+		t.Fatalf("普通令牌可覆盖账户: %d", code)
+	}
+	bound := issue("a@example.com", http.StatusCreated)
+	if bound.ReplaceAccountID != "a@example.com" {
+		t.Fatal("令牌未返回更新目标")
+	}
+	if code := upload(bound.Token, "other@example.com"); code != http.StatusForbidden {
+		t.Fatalf("绑定令牌可覆盖其他账户: %d", code)
+	}
+	if code := upload(bound.Token, ""); code != http.StatusCreated {
+		t.Fatalf("旧客户端定向更新 = %d", code)
+	}
+	if len(admin.imported) != 1 || admin.imported[0].ReplaceAccountID != "a@example.com" {
+		t.Fatal("服务端未强制使用令牌绑定的更新目标")
 	}
 }

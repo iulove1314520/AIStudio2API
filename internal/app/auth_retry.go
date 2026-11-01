@@ -28,6 +28,7 @@ type authRuntimeRefresher struct {
 	prepareHeaders func(string) (func(bool), error)
 	globalProxy    string
 	requests       *requestRegistry
+	supported      func() bool
 }
 
 // authRetryTransport 为普通 RPC 执行一次认证续签重试
@@ -161,6 +162,7 @@ func newAuthRuntimeRefresher(
 		reset: workers.Reset, prepareWorker: workers.prepareUpdate, prepareHeaders: headers.prepareInvalidate,
 		globalProxy: globalProxy,
 		requests:    requests,
+		supported:   chromeauth.RefreshSupported,
 	}
 }
 
@@ -399,6 +401,11 @@ func (refresher *authRuntimeRefresher) Refresh(ctx context.Context, generation u
 	account := lease.Account()
 	startedAt := time.Now()
 	refreshed := false
+	defer func() {
+		if refreshed {
+			lease.RecordAuthRefresh(false)
+		}
+	}()
 	err := lease.RefreshStorageState(generation, func(state *aistudio.StorageState) error {
 		refreshed = true
 		refresher.requests.log(account.Config.Label, "INFO", "账户认证续签 | 1/2 | 刷新 Cookie")
@@ -466,11 +473,20 @@ func (refresher *authRuntimeRefresher) Refresh(ctx context.Context, generation u
 		"账户认证续签完成 | 耗时=%s",
 		time.Since(startedAt).Round(time.Millisecond),
 	))
+	refreshed = false
+	lease.RecordAuthRefresh(true)
 	return nil
 }
 
 // Available 返回当前租约账户是否保存了 Chrome OAuth 续签材料
 func (refresher *authRuntimeRefresher) Available(ctx context.Context) bool {
+	supported := chromeauth.RefreshSupported
+	if refresher.supported != nil {
+		supported = refresher.supported
+	}
+	if !supported() {
+		return false
+	}
 	lease, ok := aistudio.AccountLeaseFromContext(ctx)
 	if !ok {
 		return false

@@ -214,6 +214,9 @@ type Account struct {
 	persistenceLocked     bool
 	authGeneration        uint64
 	authCheckedAt         time.Time
+	authVerifiedAt        time.Time
+	authRefreshAt         time.Time
+	authRefreshResult     string
 	modelAccessGeneration uint64
 	stateMessage          string
 	catalogErr            error
@@ -238,6 +241,42 @@ type AccountStatus struct {
 	Cooldowns   map[string]CooldownState `json:"-"`
 	LastUsed    *time.Time               `json:"last_used,omitempty"`
 	Message     string                   `json:"message,omitempty"`
+	Auth        AccountAuthStatus        `json:"auth"`
+}
+
+// AccountAuthStatus 只包含认证来源和本次运行的检查结果，不返回 Cookie 或 OAuth 材料。
+type AccountAuthStatus struct {
+	Source            string     `json:"source"`
+	RefreshMode       string     `json:"refresh_mode"`
+	VerifiedAt        *time.Time `json:"verified_at,omitempty"`
+	LastRefreshAt     *time.Time `json:"last_refresh_at,omitempty"`
+	LastRefreshResult string     `json:"last_refresh_result,omitempty"`
+	HasOAuth          bool       `json:"-"`
+}
+
+func accountAuthStatus(account *Account) AccountAuthStatus {
+	status := AccountAuthStatus{Source: "cookie"}
+	if extension, exists, err := account.StorageState.AuthExtension(); err != nil {
+		status.Source = "unknown"
+	} else if exists {
+		switch extension.Source.Browser {
+		case "chrome", "camoufox", "cookie":
+			status.Source = extension.Source.Browser
+		default:
+			status.Source = "unknown"
+		}
+		status.HasOAuth = extension.OAuth != nil
+	}
+	if !account.authVerifiedAt.IsZero() {
+		value := account.authVerifiedAt
+		status.VerifiedAt = &value
+	}
+	if !account.authRefreshAt.IsZero() {
+		value := account.authRefreshAt
+		status.LastRefreshAt = &value
+		status.LastRefreshResult = account.authRefreshResult
+	}
+	return status
 }
 
 // AccountSelection 描述账户调度所需的能力或粘性条件
@@ -1355,6 +1394,9 @@ func (l *AccountLease) markAuthenticationStateAt(required bool, reason string, c
 		return nil
 	}
 	l.account.authCheckedAt = checkedAt
+	if !required {
+		l.account.authVerifiedAt = time.Now().UTC()
+	}
 	if !l.account.Config.Enabled {
 		l.account.State = AccountDisabled
 	} else if required {
@@ -1399,8 +1441,28 @@ func (l *AccountLease) SaveStorageState(state StorageState) error {
 	l.account.authGeneration++
 	l.authGeneration = l.account.authGeneration
 	l.account.authCheckedAt = time.Time{}
+	l.account.authVerifiedAt = time.Time{}
+	l.account.authRefreshAt = time.Time{}
+	l.account.authRefreshResult = ""
 	l.pool.mu.Unlock()
 	return nil
+}
+
+// RecordAuthRefresh 记录当前认证版本的续签结果，忽略已被新凭证替代的请求。
+func (l *AccountLease) RecordAuthRefresh(success bool) {
+	l.operation.Lock()
+	defer l.operation.Unlock()
+	l.pool.mu.Lock()
+	defer l.pool.mu.Unlock()
+	if l.pool.byID[l.account.ID] != l.account || l.authGeneration != l.account.authGeneration {
+		return
+	}
+	l.account.authRefreshAt = time.Now().UTC()
+	l.account.authRefreshResult = "failed"
+	if success {
+		l.account.authRefreshResult = "success"
+	}
+	l.pool.notifyLocked()
 }
 
 // AuthGeneration 返回账户当前的认证版本号
@@ -1471,6 +1533,7 @@ func (l *AccountLease) RefreshStorageState(
 	l.account.authGeneration++
 	l.authGeneration = l.account.authGeneration
 	l.account.authCheckedAt = time.Time{}
+	l.account.authVerifiedAt = time.Time{}
 	l.pool.mu.Unlock()
 	finishCommit(true)
 	return nil
@@ -2260,6 +2323,22 @@ func (p *AccountPool) MarkReady(accountID string) error {
 	return p.setAccountState(accountID, AccountReady, "")
 }
 
+// RecordAuthenticationVerified 记录外部验证时间，保留账户当前调度状态及更新的认证结论。
+func (p *AccountPool) RecordAuthenticationVerified(accountID string, checkedAt time.Time) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	account := p.byID[accountID]
+	if account == nil {
+		return fmt.Errorf("%w: %s", ErrAccountNotFound, accountID)
+	}
+	if checkedAt.IsZero() || checkedAt.Before(account.authCheckedAt) || checkedAt.Before(account.authVerifiedAt) {
+		return nil
+	}
+	account.authVerifiedAt = checkedAt.UTC()
+	p.notifyLocked()
+	return nil
+}
+
 // Status 返回账户池的脱敏状态
 func (p *AccountPool) Status() []AccountStatus {
 	p.mu.Lock()
@@ -2302,6 +2381,7 @@ func (p *AccountPool) Status() []AccountStatus {
 			BenefitTier: tier,
 			Cooldowns:   cloneCooldowns(account.runtime.Cooldowns),
 			Message:     message,
+			Auth:        accountAuthStatus(account),
 		}
 		if !account.LastUsed.IsZero() {
 			status.LastUsed = timePointer(account.LastUsed)
@@ -2668,6 +2748,9 @@ func (p *AccountPool) setAccountState(accountID string, state AccountState, reas
 	account.stateMessage = strings.TrimSpace(reason)
 	if state == AccountReady || state == AccountAuthRequired {
 		account.authCheckedAt = time.Now().UTC()
+	}
+	if state == AccountReady {
+		account.authVerifiedAt = time.Now().UTC()
 	}
 	p.notifyLocked()
 	return nil

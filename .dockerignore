@@ -1,3 +1,6 @@
+.git/
+deploy/
+记录.md
 data/
 auth/
 runtime/

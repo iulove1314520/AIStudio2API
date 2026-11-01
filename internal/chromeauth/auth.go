@@ -15,6 +15,11 @@ import (
 
 const maxCookieAge = 400 * 24 * time.Hour
 
+// RefreshSupported 表示当前平台是否实现了 Chrome OAuth 续签。
+func RefreshSupported() bool {
+	return ensurePlatformImport() == nil
+}
+
 // Account 描述本机 Chrome 中可发现的 Google 账号
 type Account struct {
 	ID          string `json:"id"`

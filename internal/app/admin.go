@@ -23,18 +23,19 @@ import (
 
 // runtimeAdmin 投影运行时权威状态
 type runtimeAdmin struct {
-	lifecycle   context.Context
-	pool        *aistudio.AccountPool
-	store       *aistudio.AccountStore
-	service     *trackedService
-	requests    *requestRegistry
-	login       aistudio.IsolatedLoginDriver
-	workers     *accountWorkerManager
-	headers     *accountHeaderProvider
-	configPath  string
-	config      config.Config
-	proxies     *aistudio.ProxyPool
-	globalProxy string
+	lifecycle     context.Context
+	pool          *aistudio.AccountPool
+	store         *aistudio.AccountStore
+	service       *trackedService
+	requests      *requestRegistry
+	login         aistudio.IsolatedLoginDriver
+	workers       *accountWorkerManager
+	headers       *accountHeaderProvider
+	configPath    string
+	config        config.Config
+	proxies       *aistudio.ProxyPool
+	globalProxy   string
+	verifyAccount func(context.Context, *aistudio.StorageState, string, int) (chromeauth.Verification, error)
 }
 
 type adminOperationError struct {
@@ -343,18 +344,63 @@ func (admin *runtimeAdmin) ImportChromeAccounts(ctx context.Context, input api.C
 	return accounts, nil
 }
 
-// ImportAccountState 导入远程配对上传或 Cookie 导入的认证状态与 Camoufox 指纹，未给标签时以 Cookie 中第 auth_user 个会话登录的账户邮箱为标签
-func (admin *runtimeAdmin) ImportAccountState(ctx context.Context, input api.AccountStateInput) (api.AdminAccount, error) {
-	label := strings.TrimSpace(input.Label)
-	if label == "" {
-		verification, err := chromeauth.VerifyAuthUser(ctx, &input.StorageState, admin.effectiveProxy(input.Proxy), input.AuthUser)
-		if errors.Is(err, chromeauth.ErrSignedOut) {
-			return api.AdminAccount{}, &adminOperationError{status: http.StatusBadRequest, code: "signed_out", message: err.Error()}
-		}
+// ImportAccountState 验证真实 Google 身份后创建账户，或明确替换同一账户的凭证。
+func (admin *runtimeAdmin) ImportAccountState(ctx context.Context, input api.AccountStateInput) (result api.AdminAccount, resultErr error) {
+	if input.AuthUser < 0 || input.AuthUser > 9 {
+		return result, invalidAccount(fmt.Errorf("Google 会话序号必须在 0..9 之间"))
+	}
+	if err := input.StorageState.Validate(); err != nil {
+		return result, invalidAccount(err)
+	}
+	if err := config.ValidateProxy(input.Proxy); err != nil {
+		return result, invalidAccount(err)
+	}
+	var lease *aistudio.AccountLease
+	proxy := ""
+	if target := strings.ToLower(strings.TrimSpace(input.ReplaceAccountID)); target != "" {
+		var err error
+		lease, err = admin.pool.AcquireAccount(ctx, target)
 		if err != nil {
-			return api.AdminAccount{}, invalidAccount(err)
+			return result, accountOperationError(err)
 		}
-		label = strings.ToLower(verification.Email)
+		defer func() { resultErr = errors.Join(resultErr, lease.Release()) }()
+		proxy = lease.Account().EffectiveProxy(admin.globalProxy)
+	} else {
+		proxy = admin.effectiveProxy(input.Proxy)
+	}
+	verify := admin.verifyAccount
+	if verify == nil {
+		verify = chromeauth.VerifyAuthUser
+	}
+	verification, err := verify(ctx, &input.StorageState, proxy, input.AuthUser)
+	if errors.Is(err, chromeauth.ErrSignedOut) {
+		return result, &adminOperationError{status: http.StatusBadRequest, code: "signed_out", message: err.Error()}
+	}
+	if err != nil {
+		return result, invalidAccount(err)
+	}
+	verifiedAt := time.Now().UTC()
+	label := strings.ToLower(strings.TrimSpace(verification.Email))
+	if claimed := strings.TrimSpace(input.Label); claimed != "" && !strings.EqualFold(claimed, label) {
+		return result, invalidAccount(fmt.Errorf("凭证登录的 Google 账户与指定邮箱不一致"))
+	}
+	if extension, exists, err := input.StorageState.AuthExtension(); err != nil {
+		return result, invalidAccount(err)
+	} else if exists && extension.Source.Email != "" && !strings.EqualFold(strings.TrimSpace(extension.Source.Email), label) {
+		return result, invalidAccount(fmt.Errorf("凭证登录的 Google 账户与认证来源不一致"))
+	}
+	if lease != nil {
+		if !strings.EqualFold(lease.Account().ID, label) {
+			return result, invalidAccount(fmt.Errorf("凭证登录的 Google 账户与待更新账户不一致"))
+		}
+		if err := admin.replaceAccountCredentials(lease, input.StorageState, input.AuthUser); err != nil {
+			return result, accountOperationError(err)
+		}
+		if err := lease.Release(); err != nil {
+			return result, err
+		}
+		admin.requests.log("auth", "INFO", "账户凭证已更新 | 账户="+label)
+		return admin.account(label)
 	}
 	accountConfig := aistudio.DefaultAccountConfig(label)
 	accountConfig.AuthUser = input.AuthUser
@@ -374,14 +420,8 @@ func (admin *runtimeAdmin) ImportAccountState(ctx context.Context, input api.Acc
 	if _, err := aistudio.NewSigner().Authorization(input.StorageState); err != nil {
 		return api.AdminAccount{}, invalidAccount(fmt.Errorf("认证状态无法用于 AI Studio: %w", err))
 	}
-	email := accountConfig.Label
-	if extension, exists, err := input.StorageState.AuthExtension(); err != nil {
-		return api.AdminAccount{}, invalidAccount(err)
-	} else if exists && strings.TrimSpace(extension.Source.Email) != "" {
-		email = extension.Source.Email
-	}
 	for _, status := range admin.pool.Status() {
-		if strings.EqualFold(status.ID, strings.TrimSpace(email)) {
+		if strings.EqualFold(status.ID, label) {
 			return api.AdminAccount{}, &adminOperationError{
 				status: http.StatusConflict, code: "account_exists", message: "账户已存在: " + status.ID,
 			}
@@ -403,8 +443,54 @@ func (admin *runtimeAdmin) ImportAccountState(ctx context.Context, input api.Acc
 	if err != nil {
 		return api.AdminAccount{}, err
 	}
+	if err := admin.pool.RecordAuthenticationVerified(account.ID, verifiedAt); err != nil {
+		return result, err
+	}
 	admin.requests.log("auth", "INFO", "认证状态账户已导入 | 账户="+account.Label)
-	return account, nil
+	return admin.account(account.ID)
+}
+
+// replaceAccountCredentials 保留账户环境和模型配置；写入失败时恢复会话序号。
+func (admin *runtimeAdmin) replaceAccountCredentials(lease *aistudio.AccountLease, state aistudio.StorageState, authUser int) error {
+	account := lease.Account()
+	if err := keepAuthExtension(&state, account.StorageState); err != nil {
+		return err
+	}
+	if _, err := aistudio.NewSigner().Authorization(state); err != nil {
+		return fmt.Errorf("认证状态无法用于 AI Studio: %w", err)
+	}
+	previous := account.Config
+	next := previous
+	next.AuthUser = authUser
+	worker, err := admin.workers.prepareUpdate(account, next)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			worker.Discard()
+		}
+	}()
+	finish, err := admin.headers.prepareInvalidate(account.ID)
+	if err != nil {
+		return err
+	}
+	defer func() { finish(committed) }()
+	if next.AuthUser != previous.AuthUser {
+		if err := lease.SaveConfig(next); err != nil {
+			return err
+		}
+	}
+	if err := lease.SaveStorageState(state); err != nil {
+		if next.AuthUser != previous.AuthUser {
+			err = errors.Join(err, lease.SaveConfig(previous))
+		}
+		return err
+	}
+	worker.Commit()
+	committed = true
+	return admin.pool.MarkReady(account.ID)
 }
 
 func (admin *runtimeAdmin) addAccount(
@@ -811,10 +897,17 @@ func (admin *runtimeAdmin) loginRequest(account *aistudio.Account, directory str
 }
 
 func adminAccountDTO(status aistudio.AccountStatus) api.AdminAccount {
+	status.Auth.RefreshMode = "relogin"
+	if status.Auth.Source == "chrome" || status.Auth.HasOAuth {
+		status.Auth.RefreshMode = "source_computer"
+		if chromeauth.RefreshSupported() {
+			status.Auth.RefreshMode = "automatic"
+		}
+	}
 	return api.AdminAccount{
 		ID: status.ID, Label: status.Label, Enabled: status.Enabled, State: string(status.State),
 		Proxy: status.Proxy, Egress: status.Egress, Locale: status.Locale, Timezone: status.Timezone,
-		Models: status.Models, BenefitTier: status.BenefitTier, Message: status.Message,
+		Models: status.Models, BenefitTier: status.BenefitTier, Message: status.Message, Auth: status.Auth,
 	}
 }
 

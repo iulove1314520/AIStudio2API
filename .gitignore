@@ -11,6 +11,9 @@
 /auth/
 /runtime/
 /data/
+# 本机部署配置和维护记录，可能包含服务器环境信息
+/deploy/
+/记录.md
 *.log
 
 # SpiderMonkey 静态库

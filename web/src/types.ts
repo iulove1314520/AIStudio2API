@@ -30,6 +30,13 @@ export interface Account {
   models: string[]
   benefit_tier: string
   message: string
+  auth?: {
+    source: 'chrome' | 'camoufox' | 'cookie' | 'unknown'
+    refresh_mode: 'automatic' | 'source_computer' | 'relogin'
+    verified_at?: string
+    last_refresh_at?: string
+    last_refresh_result?: 'success' | 'failed'
+  }
 }
 
 interface ProxyPoolEntry {
@@ -73,6 +80,7 @@ export interface ChromeImportProfile {
 export interface PairingToken {
   token: string
   expires_at: string
+  replace_account_id?: string
 }
 
 export interface ChromeImportInput extends AccountLoginInput {
@@ -80,6 +88,7 @@ export interface ChromeImportInput extends AccountLoginInput {
 }
 
 export interface CookieImportInput extends AccountLoginInput {
+  replace_account_id?: string
   label: string
   cookies: string
   cdp: string

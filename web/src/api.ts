@@ -173,7 +173,11 @@ export const api = {
       method: 'POST',
       body: jsonBody(input),
     }),
-  createPairing: () => requestJSON<PairingToken>('/api/pairing', { method: 'POST' }),
+  createPairing: (replaceAccountID = '') =>
+    requestJSON<PairingToken>('/api/pairing', {
+      method: 'POST',
+      body: jsonBody({ replace_account_id: replaceAccountID }),
+    }),
   updateAccount: (id: string, draft: AccountDraft) =>
     requestCommand(`/api/accounts/${encodeURIComponent(id)}`, {
       method: 'PUT',

@@ -38,6 +38,7 @@ func TestAuthRefreshWithoutExtension(t *testing.T) {
 	}
 	refresher := &authRuntimeRefresher{
 		pool: pool, requests: newRequestRegistry(t.Context()),
+		supported: func() bool { return true },
 		chromeHas: func(email string) bool { return email == account.ID },
 		importCurrent: func(_ context.Context, source aistudio.AuthSource, _ *aistudio.ChromeOAuthMaterial, _ string) (aistudio.StorageState, error) {
 			updated := aistudio.StorageState{Cookies: cookies}
@@ -55,6 +56,10 @@ func TestAuthRefreshWithoutExtension(t *testing.T) {
 	}
 	if err := refresher.Refresh(ctx, lease.AuthGeneration()); err != nil {
 		t.Fatal(err)
+	}
+	status := pool.Status()[0].Auth
+	if status.LastRefreshAt == nil || status.LastRefreshResult != "success" {
+		t.Fatalf("缺少成功续签状态: %+v", status)
 	}
 	stored, err := aistudio.LoadStorageState(storage)
 	if err != nil {

@@ -152,17 +152,18 @@ type AdminAccountCounts struct {
 
 // AdminAccount 表示管理端账户摘要
 type AdminAccount struct {
-	ID          string   `json:"id"`
-	Label       string   `json:"label"`
-	Enabled     bool     `json:"enabled"`
-	State       string   `json:"state"`
-	Proxy       string   `json:"proxy"`
-	Egress      string   `json:"egress"`
-	Locale      string   `json:"locale"`
-	Timezone    string   `json:"timezone"`
-	Models      []string `json:"models"`
-	BenefitTier string   `json:"benefit_tier"`
-	Message     string   `json:"message"`
+	ID          string                     `json:"id"`
+	Label       string                     `json:"label"`
+	Enabled     bool                       `json:"enabled"`
+	State       string                     `json:"state"`
+	Proxy       string                     `json:"proxy"`
+	Egress      string                     `json:"egress"`
+	Locale      string                     `json:"locale"`
+	Timezone    string                     `json:"timezone"`
+	Models      []string                   `json:"models"`
+	BenefitTier string                     `json:"benefit_tier"`
+	Message     string                     `json:"message"`
+	Auth        aistudio.AccountAuthStatus `json:"auth"`
 }
 
 // AdminProxy 表示代理池中一个代理的可用性与绑定账户数
@@ -201,13 +202,14 @@ type AccountCreateInput struct {
 
 // CookieImportInput 表示 Cookie 导入的账户邮箱、Cookie 文本或浏览器调试地址与账户环境
 type CookieImportInput struct {
-	Label    string `json:"label"`
-	Cookies  string `json:"cookies"`
-	CDP      string `json:"cdp"`
-	Proxy    string `json:"proxy"`
-	Locale   string `json:"locale"`
-	Timezone string `json:"timezone"`
-	AuthUser int    `json:"auth_user"`
+	ReplaceAccountID string `json:"replace_account_id,omitempty"`
+	Label            string `json:"label"`
+	Cookies          string `json:"cookies"`
+	CDP              string `json:"cdp"`
+	Proxy            string `json:"proxy"`
+	Locale           string `json:"locale"`
+	Timezone         string `json:"timezone"`
+	AuthUser         int    `json:"auth_user"`
 }
 
 // ChromeImportProfile 表示可从本机 Chrome 导入的账号
@@ -468,7 +470,7 @@ func (s *server) handleImportCookieAccount(w http.ResponseWriter, r *http.Reques
 	}
 	account, err := s.config.Admin.ImportAccountState(r.Context(), AccountStateInput{
 		Label: input.Label, Proxy: input.Proxy, Locale: input.Locale, Timezone: input.Timezone,
-		AuthUser: input.AuthUser, StorageState: state,
+		AuthUser: input.AuthUser, StorageState: state, ReplaceAccountID: input.ReplaceAccountID,
 	})
 	if err != nil {
 		writeAdminUpstreamError(w, err)

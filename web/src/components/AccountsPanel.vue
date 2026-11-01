@@ -47,6 +47,7 @@ const showEditor = ref(false)
 const showBrowserLogin = ref(false)
 const showChromeImport = ref(false)
 const showCookieImport = ref(false)
+const credentialAccountID = ref('')
 const cookieText = ref('')
 const cookieCandidates = ref<CookieBrowser[]>([])
 const selectedCookieUsers = ref<number[]>([])
@@ -138,7 +139,59 @@ const visibleAccounts = computed(() => {
 })
 
 // reason 是悬窗中显示的账户、原因类别与完整原因
-const reason = ref<{ account: Account; kind: string; text: string } | null>(null)
+const reason = ref<{ account: Account; kind: string; text: string; info?: boolean } | null>(null)
+
+function credentialMode(account: Account): string {
+  switch (account.auth?.refresh_mode) {
+    case 'automatic':
+      return t('accounts.credentialAutomatic')
+    case 'source_computer':
+      return t('accounts.credentialSourceComputer')
+    default:
+      return t('accounts.credentialRelogin')
+  }
+}
+
+function showCredentials(account: Account): void {
+  const auth = account.auth
+  const source =
+    auth?.source === 'chrome'
+      ? 'Chrome'
+      : auth?.source === 'camoufox'
+        ? 'Camoufox'
+        : auth?.source === 'cookie'
+          ? 'Cookie'
+          : t('accounts.credentialUnknown')
+  const time = (value?: string) =>
+    value ? new Date(value).toLocaleString() : t('accounts.credentialUnknown')
+  const result =
+    auth?.last_refresh_result === 'success'
+      ? t('accounts.credentialSuccess')
+      : auth?.last_refresh_result === 'failed'
+        ? t('accounts.credentialFailed')
+        : t('accounts.credentialUnknown')
+  reason.value = {
+    account,
+    kind: t('accounts.credentialDetails'),
+    info: true,
+    text: [
+      `${t('accounts.credentialSource')}: ${source}`,
+      credentialMode(account),
+      `${t('accounts.credentialVerified')}: ${time(auth?.verified_at)}`,
+      `${t('accounts.credentialRefreshed')}: ${time(auth?.last_refresh_at)} · ${result}`,
+    ].join('\n'),
+  }
+}
+
+function updateCredentials(account: Account): void {
+  credentialAccountID.value = account.id
+  Object.assign(accountEnvironment, {
+    proxy: account.proxy,
+    locale: account.locale,
+    timezone: account.timezone,
+  })
+  showCookieImport.value = true
+}
 
 // accountSummary 把账户等级、出口、语言与时区合成一行
 function accountSummary(account: Account): string {
@@ -250,10 +303,10 @@ async function beginBrowserLogin(): Promise<void> {
 }
 
 // openPairing 生成远程配对令牌，旧令牌随之失效
-async function openPairing(): Promise<void> {
+async function openPairing(accountID = ''): Promise<void> {
   pendingAction.value = 'pairing'
   try {
-    pairing.value = await api.createPairing()
+    pairing.value = await api.createPairing(accountID)
   } catch (error) {
     actionError(error)
   } finally {
@@ -324,6 +377,7 @@ async function importChromeAccounts(): Promise<void> {
 function closeCookieImport(): void {
   if (pendingAction.value === 'cookie-import' || pendingAction.value === 'cookie-discover') return
   showCookieImport.value = false
+  credentialAccountID.value = ''
   cookieText.value = ''
   cookieCandidates.value = []
   selectedCookieUsers.value = []
@@ -334,9 +388,16 @@ function resetCookieDiscovery(): void {
   selectedCookieUsers.value = []
 }
 
-// importableCookieUsers 是 Cookie 中尚未导入的会话序号
+// cookieCandidateAllowed 在更新模式下只允许选择目标邮箱。
+function cookieCandidateAllowed(candidate: CookieBrowser): boolean {
+  return credentialAccountID.value
+    ? candidate.email.toLowerCase() === credentialAccountID.value.toLowerCase()
+    : !candidate.imported
+}
+
+// importableCookieUsers 是本次操作允许导入或更新的会话序号。
 const importableCookieUsers = computed(() =>
-  cookieCandidates.value.filter((item) => !item.imported).map((item) => item.auth_user),
+  cookieCandidates.value.filter(cookieCandidateAllowed).map((item) => item.auth_user),
 )
 
 const allCookieCandidatesSelected = computed(
@@ -509,12 +570,14 @@ async function importCookieAccount(): Promise<void> {
   try {
     const chosen = new Set(selectedCookieUsers.value)
     const targets = cookieCandidates.value.filter((item) => chosen.has(item.auth_user))
+    const replacing = credentialAccountID.value
     for (const target of targets) {
       const { account } = await api.importCookieAccount({
         label: '',
         cookies: cookieText.value,
         cdp: '',
         auth_user: target.auth_user,
+        ...(replacing ? { replace_account_id: replacing } : {}),
         ...accountEnvironment,
       })
       target.imported = true
@@ -528,7 +591,14 @@ async function importCookieAccount(): Promise<void> {
     closeCookieImport()
     emit('refresh')
     if (count === 1) {
-      emit('notice', t('accounts.importedAccount').replace('{email}', lastAccountID), 'success')
+      emit(
+        'notice',
+        t(replacing ? 'accounts.credentialUpdated' : 'accounts.importedAccount').replace(
+          '{email}',
+          lastAccountID,
+        ),
+        'success',
+      )
     } else {
       emit('notice', t('accounts.importComplete').replace('{count}', String(count)), 'success')
     }
@@ -808,6 +878,14 @@ async function refreshAllAccounts(): Promise<void> {
                 class="block truncate text-xs text-gray-500"
                 >{{ accountSummary(account) }}</span
               >
+              <button
+                v-if="account.auth"
+                class="block max-w-full truncate text-left text-xs text-gray-400 hover:text-gray-200"
+                type="button"
+                @click="showCredentials(account)"
+              >
+                {{ credentialMode(account) }}
+              </button>
             </div>
           </div>
           <span class="shrink-0 text-xs text-gray-500 md:w-20"
@@ -917,6 +995,27 @@ async function refreshAllAccounts(): Promise<void> {
                     {{ t('common.edit') }}
                   </DropdownMenuItem>
                   <DropdownMenuItem
+                    class="flex cursor-pointer items-center gap-2.5 rounded-md px-3 py-2 text-sm text-gray-200 outline-none data-[highlighted]:bg-raised"
+                    @select="showCredentials(account)"
+                  >
+                    <UiIcon name="cookie" :size="15" />
+                    {{ t('accounts.credentials') }}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    class="flex cursor-pointer items-center gap-2.5 rounded-md px-3 py-2 text-sm text-gray-200 outline-none data-[highlighted]:bg-raised"
+                    @select="updateCredentials(account)"
+                  >
+                    <UiIcon name="cookie" :size="15" />
+                    {{ t('accounts.credentialUpdate') }}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    class="flex cursor-pointer items-center gap-2.5 rounded-md px-3 py-2 text-sm text-gray-200 outline-none data-[highlighted]:bg-raised"
+                    @select="openPairing(account.id)"
+                  >
+                    <UiIcon name="remote" :size="15" />
+                    {{ t('accounts.credentialRemoteUpdate') }}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
                     class="flex cursor-pointer items-center gap-2.5 rounded-md px-3 py-2 text-sm outline-none data-[highlighted]:bg-raised text-gray-200"
                     @select="toggleAccount(account)"
                   >
@@ -947,7 +1046,8 @@ async function refreshAllAccounts(): Promise<void> {
       >
         <pre
           v-if="reason"
-          class="rounded-md border border-line bg-canvas p-3 font-mono text-xs leading-5 whitespace-pre-wrap [overflow-wrap:anywhere] text-red-300"
+          class="rounded-md border border-line bg-canvas p-3 font-mono text-xs leading-5 whitespace-pre-wrap [overflow-wrap:anywhere]"
+          :class="reason.info ? 'text-gray-300' : 'text-red-300'"
           >{{ logText(reason.text) }}</pre>
       </DetailDialog>
 
@@ -1142,7 +1242,9 @@ async function refreshAllAccounts(): Promise<void> {
             @submit.prevent="importCookieAccount"
           >
             <div class="mb-4 flex items-center justify-between">
-              <h3 class="text-lg font-bold text-white">{{ t('accounts.pasteCookie') }}</h3>
+              <h3 class="text-lg font-bold text-white">
+                {{ t(credentialAccountID ? 'accounts.credentialUpdate' : 'accounts.pasteCookie') }}
+              </h3>
               <button
                 class="rounded p-1 text-gray-500 hover:bg-line hover:text-white disabled:opacity-50"
                 type="button"
@@ -1153,6 +1255,9 @@ async function refreshAllAccounts(): Promise<void> {
                 <UiIcon name="close" :size="16" />
               </button>
             </div>
+            <p v-if="credentialAccountID" class="mb-4 text-sm text-blue-300">
+              {{ t('accounts.credentialTarget').replace('{email}', credentialAccountID) }}
+            </p>
             <ol class="mb-5 list-decimal space-y-1 pl-5 text-sm leading-6 text-gray-300">
               <li v-for="step in pasteSteps" :key="step">{{ t(step) }}</li>
             </ol>
@@ -1196,7 +1301,9 @@ async function refreshAllAccounts(): Promise<void> {
                     :key="candidate.auth_user"
                     class="flex items-center gap-3 rounded border border-line bg-canvas p-3 transition"
                     :class="
-                      candidate.imported ? 'opacity-60' : 'cursor-pointer hover:border-gray-600'
+                      !cookieCandidateAllowed(candidate)
+                        ? 'opacity-60'
+                        : 'cursor-pointer hover:border-gray-600'
                     "
                   >
                     <input
@@ -1204,7 +1311,7 @@ async function refreshAllAccounts(): Promise<void> {
                       class="h-4 w-4 shrink-0 accent-blue-600"
                       type="checkbox"
                       :value="candidate.auth_user"
-                      :disabled="candidate.imported"
+                      :disabled="!cookieCandidateAllowed(candidate)"
                     />
                     <span class="min-w-0 flex-1">
                       <strong
@@ -1224,7 +1331,7 @@ async function refreshAllAccounts(): Promise<void> {
                 </div>
               </div>
 
-              <details class="group rounded border border-line">
+              <details v-if="!credentialAccountID" class="group rounded border border-line">
                 <summary
                   class="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-sm text-gray-400 hover:text-gray-200"
                 >
@@ -1261,7 +1368,13 @@ async function refreshAllAccounts(): Promise<void> {
                 "
               >
                 {{
-                  cookieCandidates.length > 0 ? t('accounts.importSelected') : t('accounts.import')
+                  cookieCandidates.length > 0
+                    ? t(
+                        credentialAccountID
+                          ? 'accounts.credentialUpdate'
+                          : 'accounts.importSelected',
+                      )
+                    : t('accounts.import')
                 }}
               </button>
             </div>
@@ -1398,7 +1511,13 @@ async function refreshAllAccounts(): Promise<void> {
           >
             <div class="mb-3 flex items-center justify-between">
               <h3 id="pairing-title" class="text-lg font-bold text-white">
-                {{ t('accounts.remoteAdd') }}
+                {{
+                  t(
+                    pairing.replace_account_id
+                      ? 'accounts.credentialRemoteUpdate'
+                      : 'accounts.remoteAdd',
+                  )
+                }}
               </h3>
               <button
                 class="rounded p-1 text-gray-500 hover:bg-line hover:text-white"
@@ -1409,6 +1528,9 @@ async function refreshAllAccounts(): Promise<void> {
                 <UiIcon name="close" :size="16" />
               </button>
             </div>
+            <p v-if="pairing.replace_account_id" class="mb-4 text-sm text-blue-300">
+              {{ t('accounts.credentialTarget').replace('{email}', pairing.replace_account_id) }}
+            </p>
             <ol class="mb-4 list-decimal space-y-1 pl-5 text-sm leading-6 text-gray-400">
               <li v-for="step in remoteSteps" :key="step">
                 <template v-for="(part, position) in t(step).split('`')" :key="position">
@@ -1461,7 +1583,11 @@ async function refreshAllAccounts(): Promise<void> {
             </div>
             <p class="text-xs text-gray-500">
               {{
-                t('accounts.remoteExpires').replace(
+                t(
+                  pairing.replace_account_id
+                    ? 'accounts.credentialRemoteExpires'
+                    : 'accounts.remoteExpires',
+                ).replace(
                   '{time}',
                   new Date(pairing.expires_at).toLocaleTimeString(locale, { hour12: false }),
                 )
