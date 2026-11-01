@@ -37,6 +37,7 @@ type generationAdmin interface {
 	DeleteAccount(context.Context, string) error
 	LoginAccount(context.Context, string, *camoufoxnative.LiveView) (api.AdminAccount, error)
 	RefreshAccount(context.Context, string) (api.AdminAccountRefresh, error)
+	AccountQuota(context.Context, string, string) (api.AdminAccountQuota, error)
 	StartService(context.Context) (api.AdminStatus, error)
 	StopService(context.Context) (api.AdminStatus, error)
 	RuntimeConfig(context.Context) (api.RuntimeConfig, error)
@@ -505,6 +506,13 @@ func (manager *runtimeManager) RefreshAccount(ctx context.Context, id string) (a
 	manager.mu.RLock()
 	defer manager.mu.RUnlock()
 	return manager.current.admin.RefreshAccount(ctx, id)
+}
+
+// AccountQuota 将额度查询转交当前运行时，切换配置时不使用已关闭的传输。
+func (manager *runtimeManager) AccountQuota(ctx context.Context, id, model string) (api.AdminAccountQuota, error) {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	return manager.current.admin.AccountQuota(ctx, id, model)
 }
 
 // ClearLogs 清空进程级管理日志

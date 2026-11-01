@@ -5,6 +5,7 @@ import type {
   AccountDraft,
   AccountLoginInput,
   AccountRefresh,
+  AccountQuota,
   AdminEvent,
   ChromeImportInput,
   CookieBrowser,
@@ -135,6 +136,11 @@ export const api = {
     requestJSON<UpdateStatus>(refresh ? '/api/update?refresh=1' : '/api/update'),
   applyUpdate: () => requestJSON<UpdateStatus>('/api/update', { method: 'POST' }),
   accounts: async () => (await requestJSON<AccountsResponse>('/api/accounts')).accounts,
+  accountQuota: (id: string, model: string, signal: AbortSignal) =>
+    requestJSON<AccountQuota>(
+      `/api/accounts/${encodeURIComponent(id)}/quota?${new URLSearchParams({ model })}`,
+      { signal },
+    ),
   models: async () => (await requestJSON<ModelsResponse>('/api/models')).models,
   cooldowns: async () => (await requestJSON<CooldownsResponse>('/api/cooldowns')).cooldowns,
   requests: async () => (await requestJSON<RequestsResponse>('/api/requests')).requests,

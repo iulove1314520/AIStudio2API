@@ -55,6 +55,21 @@ export interface AccountRefresh {
   models: number
 }
 
+export interface AccountQuota {
+  account_id: string
+  model_id: string
+  channel: 'playground'
+  status: 'available' | 'unknown' | 'unavailable'
+  checked_at: string
+  metrics: { name: string; limit: number | null; remaining: number | null }[]
+  recoveries: {
+    scope: string
+    until: string
+    source: 'upstream' | 'estimated' | 'unknown'
+    kind?: string
+  }[]
+}
+
 export interface AccountDraft {
   label: string
   enabled: boolean

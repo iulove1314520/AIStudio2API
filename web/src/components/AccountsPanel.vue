@@ -22,6 +22,7 @@ import type {
 } from '@/types'
 import type { IconName } from '@/icons'
 import AccountEnvironmentFields from './AccountEnvironmentFields.vue'
+import AccountQuotaDialog from './AccountQuotaDialog.vue'
 import DetailDialog from './DetailDialog.vue'
 import LoginViewer from './LoginViewer.vue'
 import UiIcon from './UiIcon.vue'
@@ -44,6 +45,10 @@ const { t, locale, errorText, logText } = useI18n()
 const defaultAccountLocale = navigator.language
 const defaultAccountTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone
 const showEditor = ref(false)
+const quotaAccountID = ref('')
+const quotaAccount = computed(
+  () => props.accounts.find((account) => account.id === quotaAccountID.value) ?? null,
+)
 const showBrowserLogin = ref(false)
 const showChromeImport = ref(false)
 const showCookieImport = ref(false)
@@ -1003,6 +1008,13 @@ async function refreshAllAccounts(): Promise<void> {
                   </DropdownMenuItem>
                   <DropdownMenuItem
                     class="flex cursor-pointer items-center gap-2.5 rounded-md px-3 py-2 text-sm text-gray-200 outline-none data-[highlighted]:bg-raised"
+                    @select="quotaAccountID = account.id"
+                  >
+                    <UiIcon name="refresh" :size="15" />
+                    {{ t('accounts.quota') }}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    class="flex cursor-pointer items-center gap-2.5 rounded-md px-3 py-2 text-sm text-gray-200 outline-none data-[highlighted]:bg-raised"
                     @select="updateCredentials(account)"
                   >
                     <UiIcon name="cookie" :size="15" />
@@ -1036,6 +1048,13 @@ async function refreshAllAccounts(): Promise<void> {
           </div>
         </div>
       </div>
+
+      <AccountQuotaDialog
+        v-if="quotaAccount"
+        :key="quotaAccount.id"
+        :account="quotaAccount"
+        @close="quotaAccountID = ''"
+      />
 
       <DetailDialog
         :open="reason !== null"

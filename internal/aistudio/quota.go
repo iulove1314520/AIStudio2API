@@ -23,9 +23,11 @@ var usageLimitResetPattern = regexp.MustCompile(`resets in (?:(\d+) hours?)?(?:,
 
 // CooldownState 表示账户或模型暂时不可调度的状态
 type CooldownState struct {
-	Until  time.Time `json:"until"`
-	Reason string    `json:"reason,omitempty"`
-	Level  int       `json:"level,omitempty"`
+	Until       time.Time `json:"until"`
+	Reason      string    `json:"reason,omitempty"`
+	Level       int       `json:"level,omitempty"`
+	QuotaKind   string    `json:"quota_kind,omitempty"`
+	ResetSource string    `json:"reset_source,omitempty"`
 }
 
 // Active 判断冷却状态当前是否生效
@@ -35,11 +37,12 @@ func (c CooldownState) Active(now time.Time) bool {
 
 // QuotaCooldown 表示上游额度限制对应的调度冷却
 type QuotaCooldown struct {
-	Until    time.Time
-	Global   bool
-	Kind     string
-	Reason   string
-	Escalate bool
+	Until       time.Time
+	Global      bool
+	Kind        string
+	Reason      string
+	Escalate    bool
+	ResetSource string
 }
 
 // QuotaCooldownForError 解析上游分钟或每日额度限制
@@ -72,14 +75,25 @@ func QuotaCooldownForError(err error, now time.Time) (QuotaCooldown, bool) {
 		kind = "无配额"
 	}
 	escalate := false
+	resetSource := "estimated"
 	if rpcError.RetryDelay > 0 {
 		until = now.Add(rpcError.RetryDelay)
+		resetSource = "upstream"
 	} else if reset, ok := usageLimitReset(message); ok {
 		until, kind = now.Add(reset), "套餐限额"
+		resetSource = "upstream"
 	} else if kind == "短期限额" && strings.Contains(message, "reached your usage limit") {
 		kind, escalate = "套餐限额", true
 	}
-	return QuotaCooldown{Until: until, Global: global, Kind: kind, Reason: kind + ": " + err.Error(), Escalate: escalate}, true
+	return QuotaCooldown{Until: until, Global: global, Kind: kind, Reason: kind + ": " + err.Error(), Escalate: escalate, ResetSource: resetSource}, true
+}
+
+// quotaKindCode 为持久化及管理端提供稳定的额度类型，非额度冷却不标记。
+func quotaKindCode(cooldown QuotaCooldown) string {
+	if cooldown.ResetSource == "" {
+		return ""
+	}
+	return map[string]string{"每日限额": "daily", "分钟限额": "minute", "套餐限额": "plan", "无配额": "none", "短期限额": "short_term"}[cooldown.Kind]
 }
 
 // BuildRejectionCooldown 返回 Build 代理以参数错误拒绝、同账户 Playground 完成的请求对应的 Build 递增冷却

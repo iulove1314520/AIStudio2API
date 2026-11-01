@@ -36,12 +36,14 @@ type runtimeAdmin struct {
 	proxies       *aistudio.ProxyPool
 	globalProxy   string
 	verifyAccount func(context.Context, *aistudio.StorageState, string, int) (chromeauth.Verification, error)
+	quotaClient   *aistudio.Client
 }
 
 type adminOperationError struct {
 	status  int
 	code    string
 	message string
+	cause   error
 }
 
 func (err *adminOperationError) Error() string {
@@ -54,6 +56,10 @@ func (err *adminOperationError) HTTPStatus() int {
 
 func (err *adminOperationError) ErrorCode() string {
 	return err.code
+}
+
+func (err *adminOperationError) Unwrap() error {
+	return err.cause
 }
 
 // invalidConfigError 将配置校验失败标记为客户端输入错误

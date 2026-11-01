@@ -2016,7 +2016,11 @@ func (p *AccountPool) MarkCooldownIfGeneration(
 	until time.Time,
 	reason string,
 ) error {
-	if !until.After(time.Now()) {
+	return p.markCooldownIfGeneration(accountID, modelAccessScope, generation, checkedAt, CooldownState{Until: until, Reason: reason})
+}
+
+func (p *AccountPool) markCooldownIfGeneration(accountID, modelAccessScope string, generation uint64, checkedAt time.Time, next CooldownState) error {
+	if !next.Until.After(time.Now()) {
 		return fmt.Errorf("冷却期限必须在未来")
 	}
 	checkedAt = checkedAt.UTC()
@@ -2036,7 +2040,7 @@ func (p *AccountPool) MarkCooldownIfGeneration(
 		if !currentAccess.CheckedAt.Before(checkedAt) {
 			return false, nil, nil
 		}
-		next := CooldownState{Until: until.UTC(), Reason: reason}
+		next.Until = next.Until.UTC()
 		currentAccess.CheckedAt = checkedAt
 		runtimeState.ModelAccess[modelAccessScope] = currentAccess
 		runtimeState.Cooldowns[modelAccessScope] = next
@@ -2071,7 +2075,9 @@ func (p *AccountPool) MarkQuotaCooldownIfGeneration(
 	cooldown QuotaCooldown,
 ) (time.Time, error) {
 	if !cooldown.Escalate {
-		return cooldown.Until, p.MarkCooldownIfGeneration(accountID, modelAccessScope, generation, checkedAt, cooldown.Until, cooldown.Reason)
+		return cooldown.Until, p.markCooldownIfGeneration(accountID, modelAccessScope, generation, checkedAt, CooldownState{
+			Until: cooldown.Until, Reason: cooldown.Reason, QuotaKind: quotaKindCode(cooldown), ResetSource: cooldown.ResetSource,
+		})
 	}
 	checkedAt = checkedAt.UTC()
 	if checkedAt.IsZero() {
@@ -2092,7 +2098,11 @@ func (p *AccountPool) MarkQuotaCooldownIfGeneration(
 			return false, nil, nil
 		}
 		previous, exists := runtimeState.Cooldowns[modelAccessScope]
-		next := planLimitCooldown(previous, exists, time.Now(), cooldown.Reason)
+		now := time.Now()
+		next := planLimitCooldown(previous, exists, now, cooldown.Reason)
+		if !exists || previous.Level <= 0 || !previous.Active(now) {
+			next.QuotaKind, next.ResetSource = quotaKindCode(cooldown), cooldown.ResetSource
+		}
 		until = next.Until
 		currentAccess.CheckedAt = checkedAt
 		runtimeState.ModelAccess[modelAccessScope] = currentAccess

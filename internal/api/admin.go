@@ -28,6 +28,7 @@ type AdminService interface {
 	DeleteAccount(context.Context, string) error
 	LoginAccount(context.Context, string, *camoufoxnative.LiveView) (AdminAccount, error)
 	RefreshAccount(context.Context, string) (AdminAccountRefresh, error)
+	AccountQuota(context.Context, string, string) (AdminAccountQuota, error)
 	StartService(context.Context) (AdminStatus, error)
 	StopService(context.Context) (AdminStatus, error)
 	ClearLogs(context.Context) error
@@ -184,6 +185,25 @@ type AdminAccountRefresh struct {
 	Models         int          `json:"models"`
 }
 
+// AdminAccountQuota 是一次按账户、模型读取的官网额度快照，不含凭证或原始 RPC 响应。
+type AdminAccountQuota struct {
+	AccountID  string                      `json:"account_id"`
+	ModelID    string                      `json:"model_id"`
+	Channel    string                      `json:"channel"`
+	Status     string                      `json:"status"`
+	CheckedAt  time.Time                   `json:"checked_at"`
+	Metrics    []aistudio.ModelQuotaMetric `json:"metrics"`
+	Recoveries []QuotaRecovery             `json:"recoveries"`
+}
+
+// QuotaRecovery 区分上游返回的等待时间、调度推算与旧记录中无法确定的来源。
+type QuotaRecovery struct {
+	Scope  string    `json:"scope"`
+	Until  time.Time `json:"until"`
+	Source string    `json:"source"`
+	Kind   string    `json:"kind,omitempty"`
+}
+
 // AccountInput 表示已有账户配置
 type AccountInput struct {
 	Label    string `json:"label"`
@@ -334,6 +354,7 @@ func (s *server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/accounts/{id}/login", s.handleLoginAccount)
 	mux.HandleFunc("GET /api/login-view/{view}", s.handleLoginView)
 	mux.HandleFunc("POST /api/accounts/{id}/refresh", s.handleRefreshAccount)
+	mux.HandleFunc("GET /api/accounts/{id}/quota", s.handleAccountQuota)
 	mux.HandleFunc("POST /api/control/start", s.handleStartService)
 	mux.HandleFunc("POST /api/control/stop", s.handleStopService)
 	mux.HandleFunc("DELETE /api/logs", s.handleClearLogs)

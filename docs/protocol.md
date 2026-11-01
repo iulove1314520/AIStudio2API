@@ -63,6 +63,7 @@ AI Studio 页面初始化还包含以下控制面 RPC：
 | `UpdateUserPreferences` | 更新欢迎状态等用户偏好 |
 | `ListPromos` | 页面活动信息 |
 | `GetAiStudioBenefitTier` | 账户权益枚举与 tier 请求头 |
+| `GetModelQuota` | 按模型查询官网可读取的账户额度 |
 | `ListRecentApplets` | 最近 Applet |
 | `ListPrompts` | 提示词目录 |
 | `GetUserRestrictions` | 账户限制 |
@@ -171,7 +172,7 @@ Cookie 的 `name`、`value`、`domain`、`path`、`expires`、`httpOnly`、`secu
 
 Google 邮箱的小写形式同时作为账户目录、管理页面标识和日志来源。新账户的 locale 与 timezone 读取当前电脑设置，管理页面使用浏览器语言和 IANA 时区；CLI 使用操作系统语言和时区。初始化、WAA、MakerSuite、OAuth 续签和 Drive 使用账户固定代理。locale 同时设置 navigator language、Accept-Language 与地区，timezone 设置浏览器时区；重新登录和 WAA runtime 复用同一账户指纹。同一电脑上的多个进程按邮箱共享 WAA runtime lease，调度器只会为未被占用的邮箱创建 Worker。
 
-`runtime-state.json` 根字段为 `cooldowns`、`resources`、`model_access`、`benefit_tier`、`catalog_fingerprint`。cooldown value 为 `{until,reason?}`；model access value 为 `{state,checked_at,reason?}`；resource value 为 `{kind?,name?,mime?,size?,purpose?,created_at,video?:{model,seconds,size,file?},alias?,sha256?,video_duration?,used_at?,display_name?}`：`alias` 为上传时指定的公开文件 ID，`sha256` 为内容的 SHA-256 摘要（Base64），`video_duration` 为视频时长（纳秒），`used_at` 为内联附件最近被请求引用的时间，`display_name` 为内联附件在请求中给出的文件名。
+`runtime-state.json` 根字段为 `cooldowns`、`resources`、`model_access`、`benefit_tier`、`catalog_fingerprint`。cooldown value 为 `{until,reason?,level?,quota_kind?,reset_source?}`；model access value 为 `{state,checked_at,reason?}`；resource value 为 `{kind?,name?,mime?,size?,purpose?,created_at,video?:{model,seconds,size,file?},alias?,sha256?,video_duration?,used_at?,display_name?}`：`alias` 为上传时指定的公开文件 ID，`sha256` 为内容的 SHA-256 摘要（Base64），`video_duration` 为视频时长（纳秒），`used_at` 为内联附件最近被请求引用的时间，`display_name` 为内联附件在请求中给出的文件名。
 
 每次运行状态事务先取得 `auth/.leases/<账户>.runtime.lock`，每 25ms 尝试一次，等待上限为 2 秒；携带调用方 context（Go 取消上下文）的事务在调用方取消或 deadline 更早到达时立即结束。取得锁后重新读取当前磁盘值，只合并目标字段，以临时文件原子替换 `runtime-state.json`，再同步内存状态与资源归属。锁等待失败、读取失败、写回失败和 unlock 失败均返回原始错误链。
 
@@ -189,6 +190,16 @@ Google 邮箱的小写形式同时作为账户目录、管理页面标识和日�
 | 3 | Plus | `X-AIStudio-G1-Tier: TIER0` |
 
 官网为 `GenerateContent`、`CountTokens`、Interaction、Code Assistant 与 Veo RPC 注入该 header。模型 field 83 描述访问方式：`1` 为付费 API key，`3` 为 Pro/Ultra 订阅，`4` 为 Ultra 订阅。公开模型目录合并全部账户的实时 `ListModels` 记录；账户调度使用 AccessModes、BenefitTier 与成功调用历史选择具体账户。
+
+### 账户额度查询
+
+字段依据为 Google 官网发布的 [Playground 前端脚本](https://www.gstatic.com/_/mss/boq-makersuite/_/js/k=boq-makersuite.MakerSuite.en_US.WzQmSiAaMZU.2018.O/ck=boq-makersuite.MakerSuite.xmU0t_x0XRI.L.W.O/am=gSgABHM/d=1/exm=_b/excm=_b/ed=1/wt=2/ujg=1/rs=AMOXD2-_zlKBnuvouFJ065WxDKRqr_rCgA/dti=1/m=AgQvWc) 中的调用和展示代码；本轮未使用真实 Google 登录态校验 RPC 响应。
+
+`GetModelQuota` 请求为 `["models/<模型ID>"]`。官网公开脚本的 Playground 调用静态确认：响应 field 1 是额度指标列表，每个指标的 field 1 为名称、field 2 为总量、field 3 为剩余量；数字可以为 JSON 整数或整数形式的字符串。当前官网明确读取 `successful_video_generations` 并以“剩余/总量”展示视频生成次数。其他模型是否返回指标尚不能由此保证，也不将这些计数直接标记为每日限额。
+
+实现只消费上述字段，未知后续字段不作推断；未返回的数值为 `null`，空列表表示余量未知。尚无确认的重置时间字段，因此不猜测额外数组槽位。恢复/重试时间来自已有额度错误：`RetryInfo`、`Retry-After` 或明确的 `resets in` 文案标记为 `upstream`，调度规则计算的期限标记为 `estimated`，旧记录缺少来源时标记为 `unknown`。这些时间与额度快照分别展示，不保证到时余量必定恢复。
+
+`GET /api/accounts/{id}/quota?model=<模型ID>` 需要管理员会话，30 秒超时，模型必须在该账户当前目录中。响应为 `AdminAccountQuota`：`account_id`、`model_id`、`channel:"playground"`、`status`、`checked_at`、`metrics:[{name,limit,remaining}]` 与 `recoveries:[{scope,until,source,kind?}]`。`status` 为 `available`（有指标）、`unknown`（空结果）或 `unavailable`（上游 404/501）；其他查询失败返回 `account_quota_unavailable`。只读查询不会清除冷却或启动生成服务，也不返回 Cookie、认证扩展或原始 RPC 正文。`build:<模型ID>` 的冷却不混入。
 
 ### 条款同意
 
@@ -1248,6 +1259,7 @@ server content 的 index `0/1/2/4/5/6` 分别为 model content、turn complete�
 | 生成服务 | `POST /api/control/start`、`POST /api/control/stop` |
 | 账户 | `GET /api/accounts`、`POST /api/accounts`、`GET/POST /api/accounts/import/chrome`、`GET /api/accounts/import/browsers`、`POST /api/accounts/import/cookies/discover`、`POST /api/accounts/import/cookies`、`PUT /api/accounts/{id}`、`DELETE /api/accounts/{id}` |
 | 账户认证与刷新 | `POST /api/accounts/{id}/login`、`POST /api/accounts/{id}/refresh`、`GET /api/login-view/{view}`（WebSocket） |
+| 账户额度 | `GET /api/accounts/{id}/quota?model=<模型ID>` |
 | 远程配对 | `POST /api/pairing`、`POST /api/pairing/accounts` |
 | 配置 | `GET /api/config`、`PUT /api/config`、`GET /api/first-event-latency` |
 | 冷却与请求 | `GET /api/cooldowns`、`GET /api/requests`、`POST /api/requests/{id}/cancel` |
